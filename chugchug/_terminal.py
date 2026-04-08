@@ -42,12 +42,17 @@ _CI_ENV_VARS = {
 
 
 def _detect_notebook() -> bool:
+    """Detect if running inside a notebook (Jupyter, Colab, Databricks, etc.).
+
+    Logic: if we're in IPython and it's NOT a plain terminal shell,
+    it's some kind of notebook kernel that can render HTML.
+    """
     try:
         from IPython import get_ipython
         shell = get_ipython()
         if shell is None:
             return False
-        return shell.__class__.__name__ == "ZMQInteractiveShell"
+        return shell.__class__.__name__ != "TerminalInteractiveShell"
     except (ImportError, NameError):
         return False
 

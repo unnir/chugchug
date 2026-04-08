@@ -381,49 +381,77 @@ class TTYHandler:
     # ─── Classic style (ASCII / no-color fallback) ───────────────────────
 
     def _format_classic(self, view: TrackerView) -> str:
-        """Classic layout: description  pct  [bar]  count  time  rate."""
-        parts: list[str] = []
+        """Classic layout: description  pct  [bar]  count  time  rate.
+
+        The bar width is computed dynamically — the text parts are measured
+        first and the bar fills whatever space remains. This prevents line
+        wrapping when counts or rates are large (e.g. 1000000/1000000).
+        """
         has_color = self._terminal.color_depth != ColorDepth.NONE
+        term_width = self._terminal.width
+
+        # ── Build text parts (everything except the bar) ──
+        left: list[str] = []   # before bar
+        right: list[str] = []  # after bar
 
         if view.desc:
-            parts.append(view.desc)
+            left.append(view.desc)
+
+        # ASCII-only text so len() == visual width (no ambiguous-width Unicode)
+        _trend_ascii = {"\u2191": "^", "\u2193": "v", "\u2192": "-"}
 
         if view.total is not None and view.total > 0:
             frac = min(view.n / view.total, 1.0)
-            pct = f"{100 * frac:5.1f}%"
             if view.state == TrackerState.COMPLETED:
-                pct = "\u2713 100%"
+                pct = "* 100%"
+            else:
+                pct = f"{100 * frac:5.1f}%"
+            left.append(pct)
 
-            bar = _render_ascii(frac, self._bar_width)
+            right.append(format_count(view.n, view.total, self._unit_scale))
             eta_val = view.eta_predictor.eta(view.n, view.total)
-
-            parts.append(f"{pct} {bar}")
-            parts.append(format_count(view.n, view.total, self._unit_scale))
-            parts.append(f"[{format_time(view.elapsed)}<{format_time(eta_val)}]")
+            right.append(f"[{format_time(view.elapsed)}<{format_time(eta_val)}]")
             rate_str = format_rate(view.eta_predictor.rate, self._unit, self._unit_scale)
             trend = view.speed_trend
             if trend:
-                rate_str += trend
-            parts.append(rate_str)
+                rate_str += _trend_ascii.get(trend, "")
+            right.append(rate_str)
         else:
-            spinner = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+            frac = 0.0
+            spinner = "-\\|/"
             idx = int(view.elapsed * 8) % len(spinner)
-            parts.append(f"{spinner[idx]} {view.n}")
-            parts.append(f"[{format_time(view.elapsed)}]")
+            left.append(f"{spinner[idx]} {view.n}")
+            right.append(f"[{format_time(view.elapsed)}]")
             rate_str = format_rate(view.eta_predictor.rate, self._unit, self._unit_scale)
             trend = view.speed_trend
             if trend:
-                rate_str += trend
-            parts.append(rate_str)
+                rate_str += _trend_ascii.get(trend, "")
+            right.append(rate_str)
 
         if view.is_stalled:
-            parts.append(f"! STALLED {format_time(view.stall_seconds)}")
+            right.append(f"! STALLED {format_time(view.stall_seconds)}")
 
         if view.metrics and self._show_metrics:
             metrics_str = " ".join(f"{k}={v}" for k, v in view.metrics.items())
-            parts.append(f"| {metrics_str}")
+            right.append(f"| {metrics_str}")
 
-        return " ".join(parts)
+        left_str = " ".join(left)
+        right_str = " ".join(right)
+
+        # ── Compute bar width from remaining space ──
+        # Layout: "{left} [{bar}] {right}"
+        # Overhead: 2 spaces (before [ and after ]) + 2 brackets
+        text_len = len(left_str) + len(right_str) + 4
+        bar_width = term_width - text_len
+
+        if view.total is not None and view.total > 0 and bar_width >= 10:
+            bar = _render_ascii(frac, bar_width)
+            return f"{left_str} {bar} {right_str}"
+
+        # Not enough room for bar — text only
+        if view.total is not None and view.total > 0:
+            return f"{left_str} {right_str}"
+        return f"{left_str} {right_str}"
 
     # ─── Completion summary ──────────────────────────────────────────────
 
