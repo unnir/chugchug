@@ -6,6 +6,7 @@ import json
 import pytest
 
 from chugchug._renderer import JSONHandler, LOGHandler, SilentHandler, TTYHandler
+from chugchug._terminal import ColorDepth, TerminalInfo
 from chugchug._types import ProgressEvent, TrackerState
 
 

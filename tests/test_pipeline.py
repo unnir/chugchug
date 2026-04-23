@@ -138,3 +138,22 @@ class TestPipelineProgress:
 
         bottleneck = pipe.bottleneck()
         assert bottleneck == "slow"
+
+    def test_closed_stage_is_not_treated_as_active(self):
+        reg = Registry()
+        pipe = Pipeline(registry=reg)
+        pipe.add_stage("extract", total=10)
+        pipe.add_stage("load", total=10, depends_on=["extract"])
+
+        extract = pipe.stage("extract")
+        load = pipe.stage("load")
+
+        for _ in range(10):
+            extract.update()
+        extract.close()
+
+        for _ in range(2):
+            load.update()
+        time.sleep(0.05)
+
+        assert pipe.bottleneck() == "load"

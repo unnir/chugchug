@@ -11,6 +11,7 @@ import multiprocessing
 import threading
 import time
 from multiprocessing import Queue
+from queue import Full
 from typing import Any
 
 from ._types import HandlerProtocol, ProgressEvent, TrackerState
@@ -62,11 +63,7 @@ class RemoteTracker:
             metrics=tuple(self._metrics.items()),
             state=TrackerState.RUNNING,
         )
-        try:
-            self._queue.put_nowait(event)
-        except Exception:
-            # Queue full — drop event. Absolute `n` means next event self-heals.
-            pass
+        self._enqueue(event, must_deliver=False)
 
     def set_description(self, desc: str) -> None:
         self._desc = desc
@@ -92,10 +89,28 @@ class RemoteTracker:
             metrics=tuple(self._metrics.items()),
             state=state,
         )
+        self._enqueue(event, must_deliver=state == TrackerState.COMPLETED)
+
+    def _enqueue(self, event: ProgressEvent, *, must_deliver: bool) -> None:
         try:
             self._queue.put_nowait(event)
+            return
+        except Full:
+            if not must_deliver:
+                return
         except Exception:
-            pass
+            if not must_deliver:
+                return
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                self._queue.put(event, timeout=0.1)
+                return
+            except Full:
+                continue
+            except Exception:
+                return
 
 
 _SENTINEL = None  # Signals the listener to stop
@@ -108,14 +123,13 @@ class QueueListener:
         self._queue = queue
         self._registry = registry or get_registry()
         self._thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
+        while True:
             try:
                 event = self._queue.get(timeout=0.1)
                 if event is _SENTINEL:
@@ -128,11 +142,15 @@ class QueueListener:
                 continue
 
     def stop(self) -> None:
-        self._stop_event.set()
-        try:
-            self._queue.put_nowait(_SENTINEL)
-        except Exception:
-            pass
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                self._queue.put(_SENTINEL, timeout=0.1)
+                break
+            except Full:
+                continue
+            except Exception:
+                break
         if self._thread:
             self._thread.join(timeout=2.0)
 

@@ -18,7 +18,7 @@ class ChugConfig:
     width: int | None = None
     gradient: str = "ocean"
     ascii: bool = False
-    output: OutputMode = OutputMode.TTY
+    output: OutputMode | None = None
     # None instead of sys.stderr for spawn safety (resolved at use time)
     file: TextIO | None = None
 

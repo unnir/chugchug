@@ -46,7 +46,7 @@ class Chug(Generic[T]):
         width: int | None = None,
         gradient: str = "ocean",
         ascii: bool = False,
-        output: OutputMode | str = OutputMode.TTY,
+        output: OutputMode | str | None = None,
         file: Any = None,
         min_interval: float = 0.05,
         min_iters: int = 1,
@@ -108,21 +108,44 @@ class Chug(Generic[T]):
         else:
             self._total = None
 
-        # Disabled?
-        self._disable = c.disable or (c.output == OutputMode.SILENT)
+        # Disable suppresses all tracking. Silent mode still dispatches to
+        # non-rendering handlers such as persistence.
+        self._disable = c.disable
 
         # Create handler (auto-detect if needed)
         self._handler: HandlerProtocol = self._create_handler()
 
+        self._system_metrics: dict[str, str] = {}
+        self._resource_monitor: Any = None
+        self._diagnostic_sampler: Any = None
+        self._persistence: Any = None
+
+        if c.monitor_cpu or c.monitor_memory or c.monitor_gpu:
+            from ._monitor import ResourceMonitor
+            self._resource_monitor = ResourceMonitor(
+                cpu=c.monitor_cpu,
+                memory=c.monitor_memory,
+                gpu=c.monitor_gpu,
+            )
+
         # Create a private registry + tracker for this bar
         self._registry = Registry()
         self._registry.add_handler(self._handler)
+        if c.persist_path is not None:
+            from ._persistence import PersistenceHandler
+            self._persistence = PersistenceHandler(c.persist_path)
+            self._registry.add_handler(self._persistence)
         self._tracker = Tracker(
             name=c.desc or "chug",
             total=self._total,
             desc=c.desc,
             registry=self._registry,
         )
+
+        if c.diagnostics and c.output != OutputMode.SILENT and not self._disable:
+            from ._diagnostics import DiagnosticSampler
+            self._diagnostic_sampler = DiagnosticSampler()
+            self._diagnostic_sampler.start()
 
         # State for throttling
         self._last_print_n = 0
@@ -144,6 +167,28 @@ class Chug(Generic[T]):
             unit=c.unit,
             unit_scale=c.unit_scale,
             show_metrics=c.show_metrics,
+            eta_strategy=c.eta_strategy,
+            eta_window=c.eta_window,
+        )
+
+    def _update_system_metrics(self) -> None:
+        if self._resource_monitor is None:
+            return
+        self._system_metrics = self._resource_monitor.snapshot()
+
+    def _merged_metrics(self) -> dict[str, str]:
+        return {**self._system_metrics, **self._tracker._metrics}
+
+    def _make_event(self) -> ProgressEvent:
+        self._update_system_metrics()
+        return ProgressEvent(
+            tracker_name=self._tracker.name,
+            n=self._tracker.n,
+            total=self._tracker.total,
+            elapsed=time.monotonic() - self._tracker._start_time,
+            desc=self._tracker._desc,
+            metrics=tuple(self._merged_metrics().items()),
+            state=self._tracker.state,
         )
 
     # ─── Iteration Protocol ──────────────────────────────────────────────
@@ -179,8 +224,8 @@ class Chug(Generic[T]):
         self.close()
 
     def __len__(self) -> int:
-        if self._total is not None:
-            return self._total
+        if self.total is not None:
+            return self.total
         raise TypeError("Chug has no length")
 
     def _iter_gen(self) -> Iterator[T]:
@@ -204,7 +249,7 @@ class Chug(Generic[T]):
 
         if dt >= self._config.min_interval and dn >= self._config.min_iters:
             self._tracker._state = TrackerState.RUNNING
-            event = self._tracker._make_event()
+            event = self._make_event()
             self._registry.dispatch(event)
             self._last_print_time = now
             self._last_print_n = self._tracker._n
@@ -218,6 +263,7 @@ class Chug(Generic[T]):
         self._tracker.set_metrics(**kwargs)
 
     def set_description(self, desc: str) -> None:
+        self._config.desc = desc
         self._tracker.set_description(desc)
 
     def set_postfix(self, **kwargs: Any) -> None:
@@ -227,15 +273,19 @@ class Chug(Generic[T]):
     def reset(self, total: int | None = None) -> None:
         """Reset progress bar for reuse."""
         self._tracker.reset(total)
+        if total is not None:
+            self._total = total
+            self._config.total = total
+        self._system_metrics.clear()
         self._last_print_n = 0
         self._last_print_time = 0.0
 
     def complete(self) -> None:
         """Mark progress as complete (useful for early exits)."""
-        if self._total is not None:
-            self._tracker._n = self._total
+        if self.total is not None:
+            self._tracker._n = self.total
         self._tracker._state = TrackerState.COMPLETED
-        event = self._tracker._make_event()
+        event = self._make_event()
         self._registry.dispatch(event)
         self.close()
 
@@ -245,12 +295,13 @@ class Chug(Generic[T]):
         self._closed = True
         if not self._disable:
             self._tracker._state = TrackerState.COMPLETED
-            event = self._tracker._make_event()
+            event = self._make_event()
             self._registry.dispatch(event)
             self._registry.close_tracker(self._tracker.name)
             if not self._config.leave:
                 self._file.write("\r\033[K")
                 self._file.flush()
+            self._print_diagnostic()
 
     # ─── Properties ──────────────────────────────────────────────────────
 
@@ -264,32 +315,42 @@ class Chug(Generic[T]):
 
     @property
     def total(self) -> int | None:
-        return self._total
+        return self._tracker.total
 
     @property
     def format_dict(self) -> dict[str, Any]:
         elapsed = time.monotonic() - self._tracker._start_time
+        total = self.total
         return {
             "n": self._tracker._n,
-            "total": self._total,
+            "total": total,
             "elapsed": round(elapsed, 3),
-            "percentage": round(100 * self._tracker._n / self._total, 2) if self._total else None,
-            "desc": self._config.desc,
-            "metrics": dict(self._tracker._metrics),
+            "percentage": round(100 * self._tracker._n / total, 2) if total else None,
+            "desc": self._tracker._desc,
+            "metrics": self._merged_metrics(),
             "unit": self._config.unit,
         }
 
     # ─── Crash Context ───────────────────────────────────────────────
 
+    def _print_diagnostic(self) -> None:
+        if self._diagnostic_sampler is None:
+            return
+        sampler = self._diagnostic_sampler
+        self._diagnostic_sampler = None
+        from ._diagnostics import DiagnosticSampler
+        kind = sampler.stop()
+        DiagnosticSampler.print_diagnostic(kind, file=self._file)
+
     def _print_crash_context(self, exc: Any = None) -> None:
         """Print rich context when an exception occurs inside the loop."""
-        if self._disable:
+        if self._disable or self._config.output == OutputMode.SILENT:
             return
         from ._format import format_time
         f = self._file
         elapsed = time.monotonic() - self._tracker._start_time
         n = self._tracker._n
-        total = self._total
+        total = self.total
 
         # Build context line
         parts = [f"\n[chugchug] Failed at iteration {n:,}"]

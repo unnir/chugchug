@@ -16,7 +16,7 @@ Usage:
     from chugchug.compat import tqdm, trange
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.3"
 __author__ = "Tabularis.AI"
 
 from ._bar import Chug, chug

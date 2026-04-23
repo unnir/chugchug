@@ -1,6 +1,7 @@
 """Tests for _mp.py — multiprocessing integration."""
 
 import multiprocessing
+from queue import Full
 import time
 
 import pytest
@@ -70,6 +71,25 @@ class TestRemoteTracker:
         assert tracker.n == 0
         assert tracker.total == 50
 
+    def test_complete_retries_when_queue_is_full(self):
+        class FlakyQueue:
+            def __init__(self):
+                self.events = []
+
+            def put_nowait(self, event):
+                raise Full
+
+            def put(self, event, timeout=None):
+                self.events.append(event)
+
+        q = FlakyQueue()
+        tracker = RemoteTracker("test", q, total=10)
+
+        tracker.complete()
+
+        assert len(q.events) == 1
+        assert q.events[0].state == TrackerState.COMPLETED
+
 
 class TestQueueListener:
     def test_drains_events(self):
@@ -91,6 +111,22 @@ class TestQueueListener:
         listener.stop()
 
         assert len(handler.events) >= 3  # At least some events processed
+
+    def test_stop_drains_pending_events(self):
+        mp_ctx = multiprocessing.get_context("spawn")
+        q = mp_ctx.Queue(maxsize=100)
+        reg = Registry()
+        handler = MockHandler()
+        reg.add_handler(handler)
+
+        listener = QueueListener(q, reg)
+        listener.start()
+
+        q.put(ProgressEvent(tracker_name="test", n=1, total=1))
+        listener.stop()
+
+        assert handler.events
+        assert handler.events[0].n == 1
 
 
 class TestMPContext:

@@ -126,6 +126,13 @@ class Pipeline:
 
         return s.tracker
 
+    @staticmethod
+    def _is_complete(stage: Stage) -> bool:
+        return (
+            stage.end_time is not None
+            or (stage.tracker is not None and stage.tracker.state == TrackerState.COMPLETED)
+        )
+
     def critical_path(self) -> list[str]:
         """Compute the critical path (longest remaining time path).
 
@@ -137,7 +144,7 @@ class Pipeline:
         # Estimate remaining time for each stage
         remaining: dict[str, float] = {}
         for name, stage in self._stages.items():
-            if stage.end_time is not None:
+            if self._is_complete(stage):
                 remaining[name] = 0.0
             elif stage.tracker is not None and stage.total and stage.total > 0:
                 elapsed = time.monotonic() - (stage.start_time or time.monotonic())
@@ -184,7 +191,7 @@ class Pipeline:
 
         for name in path:
             stage = self._stages[name]
-            if stage.tracker is None or stage.end_time is not None:
+            if stage.tracker is None or self._is_complete(stage):
                 continue
             if stage.start_time is None:
                 continue
@@ -209,11 +216,10 @@ class Pipeline:
         for stage in self._stages.values():
             weight = stage.total or 1
             total_weight += weight
-            if stage.tracker is not None:
-                if stage.total and stage.total > 0:
-                    completed_weight += weight * min(stage.tracker.n / stage.total, 1.0)
-                elif stage.end_time is not None:
-                    completed_weight += weight
+            if self._is_complete(stage):
+                completed_weight += weight
+            elif stage.tracker is not None and stage.total and stage.total > 0:
+                completed_weight += weight * min(stage.tracker.n / stage.total, 1.0)
 
         return completed_weight / total_weight if total_weight > 0 else 0.0
 

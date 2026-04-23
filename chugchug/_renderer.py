@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
-from ._eta import AdaptiveETA, create_eta
+from ._eta import create_eta
 from ._format import format_count, format_rate, format_time
 from ._gradient import (
     _brighten,
@@ -29,7 +29,6 @@ from ._types import HandlerProtocol, ProgressEvent, TrackerState
 _TROUGH = (35, 35, 40)
 
 _RESET = "\033[0m"
-
 
 @dataclass
 class TrackerView:
@@ -147,6 +146,8 @@ class TTYHandler:
         unit: str = "it",
         unit_scale: bool = False,
         show_metrics: bool = True,
+        eta_strategy: str = "adaptive",
+        eta_window: int = 50,
     ) -> None:
         self._file = file or sys.stderr
         self._min_interval = min_interval
@@ -155,6 +156,8 @@ class TTYHandler:
         self._unit = unit
         self._unit_scale = unit_scale
         self._show_metrics = show_metrics
+        self._eta_strategy = eta_strategy
+        self._eta_window = eta_window
         self._views: dict[str, TrackerView] = {}
         self._view_order: list[str] = []
         self._terminal = get_terminal_info(self._file)
@@ -164,7 +167,10 @@ class TTYHandler:
     def on_event(self, event: ProgressEvent) -> None:
         name = event.tracker_name
         if name not in self._views:
-            self._views[name] = TrackerView(name=name)
+            self._views[name] = TrackerView(
+                name=name,
+                eta_predictor=create_eta(self._eta_strategy, self._eta_window),
+            )
             self._view_order.append(name)
 
         view = self._views[name]
@@ -235,8 +241,7 @@ class TTYHandler:
 
         if (is_tc or is_256) and not self._ascii_mode:
             return self._format_embedded(view, is_tc)
-        else:
-            return self._format_classic(view)
+        return self._format_classic(view)
 
     # ─── Embedded full-width style (color terminals) ─────────────────────
 

@@ -109,6 +109,8 @@ class NotebookHandler:
         unit_scale: bool = False,
         show_metrics: bool = True,
         bar_width: int | str | None = None,
+        eta_strategy: str = "adaptive",
+        eta_window: int = 50,
         **kwargs: Any,
     ) -> None:
         self._min_interval = max(min_interval, 0.1)  # notebooks need >=100ms
@@ -116,6 +118,8 @@ class NotebookHandler:
         self._unit = unit
         self._unit_scale = unit_scale
         self._show_metrics = show_metrics
+        self._eta_strategy = eta_strategy
+        self._eta_window = eta_window
         # Normalize bar_width: None/int → "100%", str kept as-is
         if bar_width is None or isinstance(bar_width, int):
             self._bar_width = "100%"
@@ -130,6 +134,7 @@ class NotebookHandler:
             self._counter += 1
             view = _NotebookView(
                 name=name,
+                eta_predictor=create_eta(self._eta_strategy, self._eta_window),
                 display_id=f"chugchug-{id(self)}-{self._counter}",
             )
             self._views[name] = view
